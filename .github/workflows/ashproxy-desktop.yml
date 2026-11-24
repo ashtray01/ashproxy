@@ -42,7 +42,7 @@ jobs:
       - run: go build -trimpath -ldflags '-s -w -H=windowsgui' -o ashproxy.exe .
       - name: Package Windows build
         run: ../scripts/package-desktop.ps1 -OutputDirectory ../artifacts
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ashproxy-windows-amd64
           path: artifacts/
