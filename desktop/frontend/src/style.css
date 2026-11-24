@@ -1,0 +1,242 @@
+:root {
+  color-scheme: light dark;
+  font:
+    13px 'Segoe UI',
+    sans-serif;
+  --bg: light-dark(#f8f9fb, #181b20);
+  --surface: light-dark(#fff, #21252b);
+  --line: light-dark(#d5dae1, #383f49);
+  --fg: light-dark(#1b2430, #ebeff5);
+  --muted: light-dark(#566476, #acb7c5);
+  --blue: light-dark(#155db0, #80b6ff);
+  --green: light-dark(#08784c, #6cd9a5);
+  color: var(--fg);
+  background: var(--bg);
+}
+* {
+  box-sizing: border-box;
+}
+[hidden] {
+  display: none !important;
+}
+body {
+  margin: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+header,
+nav,
+.toolbar,
+.caption,
+.metrics,
+.select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+header,
+nav {
+  background: var(--surface);
+  padding: 6px 10px;
+}
+header {
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+}
+header strong {
+  font-size: 16px;
+  margin-right: 8px;
+}
+small,
+p {
+  font-size: 12px;
+  color: var(--muted);
+}
+#state:before {
+  content: '●';
+  color: var(--muted);
+  margin-right: 5px;
+}
+#state[data-state='running']:before {
+  color: var(--green);
+}
+#state[data-state='error']:before,
+#error {
+  color: light-dark(#9d2525, #ffa29a);
+}
+#error {
+  padding: 5px 10px;
+  overflow-wrap: anywhere;
+  max-height: 70px;
+  overflow: auto;
+}
+main {
+  padding: 9px 10px;
+  overflow: auto;
+  flex: 1;
+}
+nav {
+  border-top: 1px solid var(--line);
+}
+nav button {
+  flex: 1;
+  border-color: transparent;
+  background: transparent;
+}
+nav button[aria-current] {
+  color: var(--blue);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--blue) 12%, var(--surface));
+}
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+button,
+select,
+input:not([type='checkbox']) {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 7px;
+}
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+button.primary {
+  background: #205ea7;
+  color: white;
+  border-color: #205ea7;
+}
+button:hover:enabled {
+  filter: brightness(0.92);
+}
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+#uptime {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+#listeners {
+  color: var(--muted);
+  font:
+    12px Consolas,
+    monospace;
+  margin: 7px 0;
+}
+.metrics {
+  border-block: 1px solid var(--line);
+  padding: 7px 0;
+  gap: 5px;
+}
+.metrics > div {
+  flex: 1;
+}
+.metrics b,
+.metrics small {
+  display: block;
+}
+.metrics b {
+  font-size: 16px;
+  font-weight: 600;
+}
+.caption {
+  justify-content: space-between;
+  margin: 6px 0;
+}
+.caption strong {
+  font-weight: 600;
+}
+canvas {
+  display: block;
+  width: 100%;
+  height: clamp(60px, 19vh, 155px);
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+h1 {
+  font-size: 15px;
+  margin: 0 0 7px;
+}
+h2 {
+  font-size: 13px;
+  margin: 12px 0 2px;
+}
+td,
+th {
+  font-variant-numeric: tabular-nums;
+}
+td:not(:first-child),
+th:not(:first-child) {
+  text-align: right;
+}
+#resetstats {
+  margin-left: auto;
+}
+.warn {
+  color: light-dark(#9d2525, #ffa29a);
+}
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+.grid label,
+.grid input {
+  display: block;
+  width: 100%;
+}
+.grid input {
+  margin-top: 3px;
+}
+#saved {
+  padding-left: 8px;
+  color: var(--green);
+}
+fieldset {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  margin: 0 0 8px;
+}
+fieldset label {
+  display: block;
+  margin: 4px 0;
+}
+input[type='checkbox'] {
+  vertical-align: middle;
+  accent-color: var(--blue);
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 6px;
+}
+th,
+td {
+  text-align: left;
+  padding: 4px;
+  border-bottom: 1px solid var(--line);
+}
+th {
+  color: var(--muted);
+  font-weight: 500;
+}
+pre {
+  font:
+    12px Consolas,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+p {
+  margin: 6px 0;
+}

@@ -1,0 +1,1106 @@
+/*
+   3APA3A simplest proxy server
+   (c) 2002-2026 by Vladimir Dubrovin <vlad@3proxy.org>
+
+   please read License Agreement
+
+*/
+
+
+
+#include "proxy.h"
+/* returns 0 on success, 1 if atyp is not supported for family, 2 if the
+   address is null. The address is set in both the 0 and the 2 case. */
+int socks5_setaddr(int family, int atyp, const unsigned char *addr, PROXYSOCKADDRTYPE *sa){
+	int i, len = 4;
+
+	memset(sa, 0, sizeof(*sa));
+	if(atyp == 4){
+#ifdef NOIPV6
+		return 1;
+#else
+		if(family == 4) return 1;
+		len = 16;
+		*SAFAMILY(sa) = AF_INET6;
+		memcpy(SAADDR(sa), addr, 16);
+#endif
+	}
+#ifndef NOIPV6
+	else if(family == 6){
+		unsigned char prefix[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255};
+
+		*SAFAMILY(sa) = AF_INET6;
+		memcpy(SAADDR(sa), prefix, 12);
+		memcpy(12 + (unsigned char *)SAADDR(sa), addr, 4);
+	}
+#endif
+	else {
+		*SAFAMILY(sa) = AF_INET;
+		memcpy(SAADDR(sa), addr, 4);
+	}
+	for(i = 0; i < len && !addr[i]; i++);
+	return (i == len)? 2 : 0;
+}
+
+#ifdef __linux__
+#include <sched.h>
+
+int switch_ns(struct srvparam *srv, int target_fd) {
+	if(target_fd < 0) return 0;
+	if(srv->saved_nsfd >= 0 && setns(srv->saved_nsfd, CLONE_NEWNET)) return -1;
+	return setns(target_fd, CLONE_NEWNET);
+}
+#endif
+
+
+char * copyright = COPYRIGHT;
+
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
+# define MYRAND_ARC4RANDOM 1
+#elif defined(__GLIBC__) && ((__GLIBC__ > 2) || ((__GLIBC__ == 2) && (__GLIBC_MINOR__ >= 36)))
+# define MYRAND_ARC4RANDOM 1
+#elif defined(__GLIBC__) && ((__GLIBC__ < 2) || ((__GLIBC__ == 2) && (__GLIBC_MINOR__ < 25)))
+# define MYRAND_FALLBACK 1
+#elif defined(__linux__)
+# define MYRAND_GETRANDOM 1
+# include <sys/random.h>
+#elif defined(_WIN32)
+# if defined(__WATCOMC__)
+#  define MYRAND_CRYPTGENRANDOM 1
+#  include <wincrypt.h>
+# else
+#  define MYRAND_BCRYPTGENRANDOM 1
+#  include <bcrypt.h>
+#  pragma comment(lib, "bcrypt.lib")
+# endif
+#else
+# define MYRAND_FALLBACK 1
+#endif
+
+
+
+#ifndef _WIN32
+ pthread_attr_t pa;
+
+
+ void daemonize(void){
+	pid_t pid = fork();
+	if(pid > 0) {
+		usleep(SLEEPTIME);
+		_exit(0); 
+	}
+	if(pid < 0) {
+		perror("fork()");
+		return;
+	}
+	setsid();
+ }
+
+#endif
+
+unsigned char **stringtable = NULL;
+
+#ifdef WITH_UN
+void make_un(const unsigned char *path, struct sockaddr_un * sun){
+        memset(sun, 0, sizeof(*sun));
+        sun->sun_family = AF_UNIX;
+        strncpy(sun->sun_path, (char *)path, sizeof(sun->sun_path) - 1);
+        if(*path == '@')*sun->sun_path = 0;
+}
+#endif
+
+
+int myinet_ntop(int af, void *src, char *dst, socklen_t size){
+#ifdef WITH_UN
+ if(af == AF_UNIX){
+	struct sockaddr_un *sun = (struct sockaddr_un *)src;
+	int ephemeral = 0;
+	char *path = sun->sun_path;
+	char *basename;
+	if(!path[0] && path[1]){
+	    ephemeral = 1;
+	    *dst++ = '@';
+	    path++;
+	}
+	basename  = strrchr(path, '/');
+	if(basename) basename++;
+	else basename = path;
+	if(size > 0){
+		strncpy(dst, basename, (size > 40) ? 40 : size - (ephemeral + 1));
+		dst[((size > 40) ? 40 : size - (ephemeral + 1))] = 0;
+	}
+	return (int)strlen(dst);
+ }
+#endif
+#ifndef NOIPV6
+ if(af != AF_INET6){
+#endif
+	unsigned u = ntohl(((struct in_addr *)src)->s_addr);
+ 	return sprintf(dst, "%u.%u.%u.%u",
+		((u&0xFF000000)>>24),
+		((u&0x00FF0000)>>16),
+		((u&0x0000FF00)>>8),
+		((u&0x000000FF)));
+#ifndef NOIPV6
+ }
+ *dst = 0;
+ inet_ntop(af, src, dst, size);
+ return (int)strlen(dst);
+#endif
+}
+
+char *rotations[] = {
+	"",
+	"/min",
+	"/hour",
+	"/day",
+	"/week",
+	"/month",
+	"/year",
+	"",
+};
+
+
+int timeouts[12] = {
+	1,    /* SINGLEBYTE_S */
+	5,    /* SINGLEBYTE_L */
+	30,   /* STRING_S */
+	60,   /* STRING_L */
+	180,  /* CONNECTION_S */
+	1800, /* CONNECTION_L */
+	15,   /* DNS_TO */
+	60,   /* CHAIN_TO */
+	15,   /* CONNECT_TO */
+	5,    /* CONNBACK_TO */
+	5,    /* LINGER_TO */
+	0
+};
+
+#ifndef _WIN32
+/* PTHREAD_STACK_MIN is 128K on glibc/aarch64 and glibc/powerpc and may be
+   a sysconf() call with _GNU_SOURCE. pthread_attr_setstacksize() fails with
+   EINVAL below it and the thread silently gets the 8M system default stack.
+ */
+size_t threadstacksize(int extra){
+	long size = BASESTACKSIZE + TLSSTACKSIZE + extra;
+
+	if(size < (long)PTHREAD_STACK_MIN) size = (long)PTHREAD_STACK_MIN;
+	return (size_t)size;
+}
+#endif
+
+#ifdef ASHPROXY_DESKTOP
+int ash_desktop;
+DECLSPEC_ALIGN(8) volatile LONG64 ash_rx, ash_tx;
+#endif
+
+struct extparam conf = {
+	.timeouts = timeouts,
+	.acl = NULL,
+	.conffile = NULL,
+	.bandlimiter = NULL,
+	.bandlimiterout = NULL,
+	.connlimiter = NULL,
+	.trafcounter = NULL,
+	.services = NULL,
+	.stacksize = 0,
+	.counterd = -1,
+	.haveerror = 0,
+	.rotate = 0,
+	.paused = 0,
+	.archiverc = 0,
+	.demon = 0,
+	.maxchild = DEFAULT_MAXCHILD,
+	.backlog = 0,
+	.needreload = 0,
+	.timetoexit = 0,
+	.version = 0,
+	.noforce = 0,
+	.bandlimver = 0,
+	.parentretries = 2,
+	.authcachetype = 6,
+	.authcachetime = 600,
+	.filtermaxsize = 1048576,
+	.gracetraf = 0,
+	.gracenum = 0,
+	.gracedelay = 0,
+	.maxseg = 0,
+	.logname = NULL,
+	.archiver = NULL,
+	.logtype = NONE,
+	.countertype = NONE,
+	.counterfile = NULL,
+#ifndef NOIPV6
+	.intsa = {AF_INET},
+	.extsa6 = {AF_INET6},
+	.extsa = {AF_INET},
+#else
+	.intsa = {AF_INET},
+	.extsa = {AF_INET},
+#endif
+	.pwl = NULL,
+	.authenticate = NULL,
+	.authfunc = doconnect,
+	.logfunc = lognone,
+	.bandlimfunc = NULL,
+	.trafcountfunc = NULL,
+	.logtarget = NULL,
+	.logformat = NULL,
+	.fmon = NULL,
+	.filters = NULL,
+	.authfuncs = NULL,
+	.stdlog = NULL,
+	.demanddialprog = NULL,
+	.stringtable = NULL,
+	.logtime = (time_t)0,
+	.time = (time_t)0,
+	.logdumpsrv = 0,
+	.logdumpcli = 0,
+	.delimchar = '@',
+};
+
+int numservers=0;
+
+char* NULLADDR="\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+
+uint32_t myrand(void){
+#if defined(MYRAND_ARC4RANDOM)
+	return arc4random();
+#elif defined(MYRAND_GETRANDOM)
+	uint32_t r = 0;
+	ssize_t n;
+	do {
+		n = getrandom(&r, sizeof(r), 0);
+	} while(n < 0 && errno == EINTR);
+	return r;
+#elif defined(MYRAND_BCRYPTGENRANDOM)
+	uint32_t r = 0;
+	BCryptGenRandom(NULL, (PUCHAR)&r, sizeof(r), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+	return r;
+#elif defined(MYRAND_CRYPTGENRANDOM)
+	uint32_t r = 0;
+	HCRYPTPROV prov;
+	if(CryptAcquireContext(&prov, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT|CRYPT_SILENT)){
+		CryptGenRandom(prov, sizeof(r), (BYTE *)&r);
+		CryptReleaseContext(prov, 0);
+	}
+	return r;
+#else
+	return ((uint32_t)rand() << 16) ^ (uint32_t)rand();
+#endif
+}
+
+#ifndef WITH_POLL
+#ifndef WITH_WSAPOLL
+int  
+#ifdef _WIN32
+ WINAPI
+#endif
+
+    mypoll(struct mypollfd *fds, unsigned int nfds, int timeout){
+	fd_set readfd;
+	fd_set writefd;
+	fd_set oobfd;
+	struct timeval tv;
+	unsigned i;
+	int num;
+	SOCKET maxfd = 0;
+
+	tv.tv_sec = timeout/1000;
+	tv.tv_usec = (timeout%1000)*1000;
+	FD_ZERO(&readfd);
+	FD_ZERO(&writefd);
+	FD_ZERO(&oobfd);
+	for(i=0; i<nfds; i++){
+#ifndef _WIN32
+		if(fds[i].fd >= FD_SETSIZE) continue;
+#endif
+		if((fds[i].events&POLLIN))FD_SET(fds[i].fd, &readfd);
+		if((fds[i].events&POLLOUT))FD_SET(fds[i].fd, &writefd);
+		if((fds[i].events&POLLPRI))FD_SET(fds[i].fd, &oobfd);
+		fds[i].revents = 0;
+		if(fds[i].fd > maxfd) maxfd = fds[i].fd;
+	}
+	if((num = select(((int)(maxfd))+1, &readfd, &writefd, &oobfd, &tv)) < 1) return num;
+	for(i=0; i<nfds; i++){
+#ifndef _WIN32
+		if(fds[i].fd >= FD_SETSIZE) continue;
+#endif
+		if(FD_ISSET(fds[i].fd, &readfd)) fds[i].revents |= POLLIN;
+		if(FD_ISSET(fds[i].fd, &writefd)) fds[i].revents |= POLLOUT;
+		if(FD_ISSET(fds[i].fd, &oobfd)) fds[i].revents |= POLLPRI;
+	}
+	return num;
+}
+#endif
+#endif
+
+
+#ifdef _WIN32
+    SOCKET WINAPI def_socket(void* state, int domain, int type, int protocol){
+        return socket(domain, type, protocol);
+    }
+    SOCKET WINAPI def_accept(void* state, SOCKET s, struct sockaddr * addr, int * addrlen){
+	return accept(s, addr, addrlen);
+    }
+    int WINAPI def_bind(void* state, SOCKET s, const struct sockaddr *addr, int addrlen){
+	return bind(s, addr, addrlen);
+    }
+    int WINAPI def_listen(void* state, SOCKET s, int backlog){
+	return listen(s, backlog);
+    }
+    int WINAPI def_connect(void* state, SOCKET s, const struct sockaddr *name, int namelen){
+	return connect(s, name, namelen);
+    }
+    int WINAPI def_getpeername(void* state, SOCKET s, struct sockaddr * name, int * namelen){
+	return getpeername(s, name, namelen);
+    }
+    int WINAPI def_getsockname(void* state, SOCKET s, struct sockaddr * name, int * namelen){
+	return 	getsockname(s, name, namelen);
+    }
+    int WINAPI def_getsockopt(void* state, SOCKET s, int level, int optname, char * optval, int * optlen){
+	return getsockopt(s, level, optname, optval, optlen);
+    }
+    int WINAPI def_setsockopt(void* state, SOCKET s, int level, int optname, const char *optval, int optlen){
+	return setsockopt(s, level, optname, optval, optlen);
+    }
+    int WINAPI def_poll(void* state, struct pollfd *fds, unsigned int nfds, int timeout){
+#ifndef WITH_POLL
+#ifndef WITH_WSAPOLL
+	return mypoll(fds, nfds, timeout);
+#else
+	return WSAPoll(fds, nfds, timeout);
+#endif
+#else
+	return poll(fds, nfds, timeout);
+#endif
+    }
+    int WINAPI def_send(void* state, SOCKET s, const char *msg, int len, int flags){
+	return send(s, msg, len, flags);
+    }
+    int WINAPI def_sendto(void* state, SOCKET s, const char *msg, int len, int flags, const struct sockaddr *to, int tolen){
+        return sendto(s, msg, len, flags, to, tolen);
+    }
+        
+    int WINAPI def_recv(void* state, SOCKET s, char *buf, int len, int flags){
+	return recv(s, buf, len, flags);
+    }
+    int WINAPI def_recvfrom(void* state, SOCKET s, char * buf, int len, int flags, struct sockaddr * from, int * fromlen){
+	return recvfrom(s, buf, len, flags, from, fromlen);
+    }
+    int WINAPI def_shutdown(void* state, SOCKET s, int how){
+	return shutdown(s, how);
+    }
+    int WINAPI def_closesocket(void* state, SOCKET s){
+	return closesocket(s);
+    }
+#else
+    SOCKET def_socket(void* state, int domain, int type, int protocol){
+        return socket(domain, type, protocol);
+    }
+    SOCKET def_accept(void* state, SOCKET s, struct sockaddr * addr, socklen_t* addrlen){
+	return accept(s, addr, addrlen);
+    }
+    int def_bind(void* state, SOCKET s, const struct sockaddr *addr, socklen_t addrlen){
+	return bind(s, addr, addrlen);
+    }
+    int def_getpeername(void* state, SOCKET s, struct sockaddr * name, socklen_t* namelen){
+	return getpeername(s, name, namelen);
+    }
+    int def_getsockname(void* state, SOCKET s, struct sockaddr * name, socklen_t* namelen){
+	return 	getsockname(s, name, namelen);
+    }
+    int def_listen(void* state, SOCKET s, int backlog){
+	return listen(s, backlog);
+    }
+    int def_connect(void* state, SOCKET s, const struct sockaddr *name, socklen_t namelen){
+	return connect(s, name, namelen);
+    }
+    int def_getsockopt(void* state, SOCKET s, int level, int optname, void * optval, socklen_t * optlen){
+	return getsockopt(s, level, optname, optval, optlen);
+    }
+    int def_setsockopt(void* state, int s, int level, int optname, const void *optval, socklen_t optlen){
+	return setsockopt(s, level, optname, optval, optlen);
+    }
+
+    int def_poll(void* state, struct pollfd *fds, nfds_t nfds, int timeout){
+#ifndef WITH_POLL
+	return mypoll(fds, nfds, timeout);
+#else
+	return poll(fds, nfds, timeout);
+#endif
+    }
+
+/* a peer gone is an error of the send, not SIGPIPE, where the system can
+   say so for a call: SIGPIPE is ignored too, for TLS and splice() */
+#ifdef MSG_NOSIGNAL
+#define SENDFLAGS MSG_NOSIGNAL
+#else
+#define SENDFLAGS 0
+#endif
+    ssize_t def_send(void* state, SOCKET s, const void *msg, size_t len, int flags){
+	return send(s, msg, len, flags | SENDFLAGS);
+    }
+    ssize_t def_sendto(void* state, SOCKET s, const void *msg, size_t len, int flags, const struct sockaddr *to, socklen_t tolen){
+	return sendto(s, msg, len, flags | SENDFLAGS, to, tolen);
+    }
+    ssize_t def_recv(void* state, SOCKET s, void *buf, size_t len, int flags){
+	return recv(s, buf, len, flags);
+    }
+    ssize_t def_recvfrom(void* state, SOCKET s, void * buf, size_t len, int flags, struct sockaddr * from, socklen_t* fromlen){
+	return recvfrom(s, buf, len, flags, from, fromlen);
+    }
+    int def_shutdown(void* state, SOCKET s, int how){
+	return shutdown(s, how);
+    }
+    int def_closesocket(void* state, SOCKET s){
+	return close(s);
+    }
+#endif
+
+struct sockfuncs so = {
+	NULL,
+	NULL,
+	def_socket,
+	def_accept,
+	def_bind,
+	def_listen,
+	def_connect,
+	def_getpeername,
+	def_getsockname,
+	def_getsockopt,
+	def_setsockopt,
+	def_poll,
+	def_send,
+	def_sendto,
+	def_recv,
+	def_recvfrom,
+	def_shutdown,
+	def_closesocket
+};
+
+#ifdef _WINCE
+
+static char cebuf[1024];
+static char ceargbuf[256];
+char * ceargv[32];
+
+char * CEToUnicode (const char *str){
+	int i;
+
+	for(i=0; i<510 && str[i]; i++){
+		cebuf[(i*2)] = str[i];
+		cebuf[(i*2)+1] = 0;
+	}
+	cebuf[(i*2)] = 0;
+	cebuf[(i*2)+1] = 0;
+	return cebuf;
+};
+
+int cesystem(const char *str){
+	STARTUPINFO startupInfo = {0};
+	startupInfo.cb = sizeof(startupInfo);
+
+	PROCESS_INFORMATION processInformation;
+
+	return CreateProcessW((LPWSTR)CEToUnicode(str), NULL, NULL, NULL, FALSE, NORMAL_PRIORITY_CLASS, NULL, NULL, &startupInfo, &processInformation);
+}
+
+int ceparseargs(const char *str){
+	int argc = 0, i;
+	int space = 1;
+
+	for(i=0; i<250 && argc<30 && str[2*i]; i++){
+		ceargbuf[i] = str[2*i];
+		if(space && ceargbuf[i]!=' '&& ceargbuf[i]!='\t'&& ceargbuf[i]!='\r'&& ceargbuf[i]!='\n'){
+			ceargv[argc++] = ceargbuf + i;
+			space = 0;
+		}
+		else if(!space && (ceargbuf[i]==' ' || ceargbuf[i]=='\t' || ceargbuf[i]=='\r' || ceargbuf[i]=='\n')){
+			ceargbuf[i] = 0;
+			space = 1;
+		}
+	}
+	return argc;
+}
+
+#endif
+
+int parsehost(int family, unsigned char *host, struct sockaddr *sa){
+	char *sp=NULL,*se=NULL;
+	uint16_t port=0;
+	int ret = 0;
+
+	if(!host) return 2;
+	if(*host == '[') se=strchr((char *)host, ']');
+	if ( (sp = strchr(se?se:(char *)host, ':')) && !strchr(sp+1, ':')) *sp = 0;
+	if(se){
+		*se = 0;
+	}
+	if(sp){
+		port = atoi(sp+1);
+	}
+	ret = !getip46(family, host + (se!=0), (struct sockaddr *)sa);
+	if(se) *se = ']';
+	if(sp) *sp = ':';
+	if(port)*SAPORT(sa) = htons(port);
+	return ret;
+}
+
+/* A host name is written into the request lines of parent protocols and
+   matched against rules, so a control byte or a space in it could end a
+   line early or pose as another destination. A name carrying one is
+   refused where it is read, and every name a client sends is read on
+   its way to the field. */
+int badhostname(const char *hostname){
+	const unsigned char *c;
+
+	if(!hostname) return 1;
+	for(c = (const unsigned char *)hostname; *c; c++)
+		if(*c <= ' ' || *c == 0x7f) return 1;
+	return 0;
+}
+
+int parsehostname(char *hostname, struct clientparam *param, uint16_t port){
+	char *sp=NULL,*se=NULL;
+	int ret = 0;
+
+	if(!hostname || !*hostname)return 2;
+	if(badhostname(hostname)) return 1;
+	if(*hostname == '[') se=strchr(hostname, ']');
+	if ((sp = strchr(se?se:hostname, ':'))) {
+		if(strchr(sp+1, ':'))sp = NULL;
+		else *sp = 0;
+	}
+	if(se){
+		*se = 0;
+	}
+	if(!*hostname){
+		if(sp){
+			port = atoi(sp+1);
+			*sp = ':';
+		}
+		/* A port alone overrides the port of a host already set; without
+		   one it names no destination to connect to. */
+		if(!param->hostname || !*param->hostname) return 1;
+		*SAPORT(&param->req) = htons(port);
+		return 0;
+	}
+	if(strlen(hostname + (se!=0)) > 253){
+		if(se) *se = ']';
+		if(sp) *sp = ':';
+		return 1;
+	}
+	if(hostname != (char *)param->hostname){
+		if(param->hostname) free(param->hostname);
+		param->hostname = (unsigned char *)strdup(hostname + (se!=0));
+	}
+	if(sp){
+		port = atoi(sp+1);
+	}
+	ret = !getip46(param->srv->family, param->hostname, (struct sockaddr *)&param->req);
+	if(se) *se = ']';
+	if(sp) *sp = ':';
+	*SAPORT(&param->req) = htons(port);
+	memset(&param->sinsr, 0, sizeof(param->sinsr));
+	return ret;
+}
+
+int parseusername(char *username, struct clientparam *param, int extpasswd){
+	char *sb = NULL, *se = NULL, *sp = NULL;
+
+	if(!username || !*username) return 1;
+	if(param->srv->needuser && (sb = strchr(username, ':')) && (se = strchr(sb + 1, ':')) && (!extpasswd || (sp = strchr(se + 1, ':')))){
+		*sb = 0;
+		*se = 0;
+		if(sp) *sp = 0;
+		if(*(sb+1)) {
+			if(param->password) free(param->password);
+			param->password = (unsigned char *)strdup(sb+1);
+		}
+		if(*username) {
+			if(param->username) free(param->username);
+			param->username = (unsigned char *)strdup(username);
+		}
+		username = se+1;
+	 }
+	if(extpasswd){
+		if(!sp) sp = strchr(username, ':');
+		if(sp){
+			*sp = 0;
+			if(param->extpassword) free(param->extpassword);
+			param->extpassword = (unsigned char *) strdup(sp+1);
+		}
+	}
+	if(param->extusername) free(param->extusername);
+	param->extusername = (unsigned char *)strdup(username);
+	if(sb) *sb = ':';
+	if(se) *se = ':';
+	if(sp) *sp = ':';
+	return 0;
+}
+
+int parseconnusername(char *username, struct clientparam *param, int extpasswd, uint16_t port){
+	char *sb, *se;
+	if(!username || !*username) return 1;
+        if ((sb=strchr(username, conf.delimchar)) == NULL){
+		if(!param->hostname && param->remsock == INVALID_SOCKET) return 2;
+		if(param->hostname)parsehostname((char *)param->hostname, param, *SAPORT(&param->req)? ntohs(*SAPORT(&param->req)) : port);
+		return parseusername(username, param, extpasswd);
+	}
+	while ((se=strchr(sb+1, conf.delimchar)))sb=se;
+	*(sb) = 0;
+	if(parseusername(username, param, extpasswd)) return 3;
+	*(sb) = conf.delimchar;
+	if(parsehostname(sb+1, param, *SAPORT(&param->req)? ntohs(*SAPORT(&param->req)) : port)) return 4;
+	return 0;
+}
+
+
+/* What waits for a socket waits in poll(): a call on it never does. */
+void nonblock(SOCKET sock){
+#ifdef _WIN32
+	unsigned long ul = 1;
+	ioctlsocket(sock, FIONBIO, &ul);
+#else
+	fcntl(sock, F_SETFL, O_NONBLOCK | fcntl(sock, F_GETFL));
+#endif
+}
+
+/* accept() with nothing to accept: another took it, or it was gone */
+int acceptagain(void){
+#ifdef _WIN32
+	int err = WSAGetLastError();
+	return err == WSAEWOULDBLOCK || err == WSAECONNRESET || err == WSAEINTR;
+#else
+	return errno == EAGAIN || errno == EWOULDBLOCK || errno == ECONNABORTED || errno == EINTR;
+#endif
+}
+
+int connectwithpoll(struct clientparam *param, SOCKET sock, struct sockaddr *sa, SASIZETYPE size, int to){
+		struct pollfd fds[1];
+#ifdef _WIN32
+		unsigned long ul = 1;
+		ioctlsocket(sock, FIONBIO, &ul);
+#else
+		fcntl(sock,F_SETFL, O_NONBLOCK | fcntl(sock,F_GETFL));
+#endif
+		if(param?param->srv->so._connect(param->sostate, sock,sa,size) : so._connect(so.state, sock,sa,size)) {
+			if(errno != EAGAIN && errno != EINPROGRESS) return 13;
+		}
+		if(!errno) return 0;
+	        memset(fds, 0, sizeof(fds));
+	        fds[0].fd = sock;
+	        fds[0].events = POLLOUT;
+		if((param?param->srv->so._poll(param->sostate, fds, 1, to*1000):so._poll(so.state, fds, 1, to*1000)) <= 0 || !(fds[0].revents & POLLOUT) || (fds[0].revents & (POLLERR|POLLHUP))) {
+			return 13;
+		}
+		return 0;
+}
+
+
+/* Number of ports tried before giving up when the range has to be searched by
+ * hand. The kernel option picks a free port itself and needs no retries. */
+#define RANGETRIES 10
+
+static int bindrange(struct clientparam *param, SOCKET sock, PROXYSOCKADDRTYPE *sa, uint32_t range, int *tries);
+
+/* -Di / -De: ties a socket to the interface asked for, for TCP and UDP alike.
+   Where the option is set per protocol, family is the one of the address the
+   socket will be bound to. */
+int bindtodevice(struct sockfuncs *sf, void *state, SOCKET sock, const char *device, int family){
+	if(!device) return 0;
+#if defined SO_BINDTODEVICE
+	if(sf->_setsockopt(state, sock, SOL_SOCKET, SO_BINDTODEVICE, device, strlen(device) + 1))
+		return 1;
+#elif defined IP_BOUND_IF
+	{
+	    int idx;
+	    idx = if_nametoindex(device);
+	    if(!idx || (family == AF_INET && sf->_setsockopt(state, sock, IPPROTO_IP, IP_BOUND_IF, &idx, sizeof(idx))))
+			return 1;
+#ifndef NOIPV6
+#ifndef IPV6_BOUND_IF
+#define IPV6_BOUND_IF 125
+#endif
+	    if(family == AF_INET6 && sf->_setsockopt(state, sock, IPPROTO_IPV6, IPV6_BOUND_IF, &idx, sizeof(idx))) return 1;
+#endif
+	}
+#endif
+	return 0;
+}
+
+/* the external side, a socket to be bound to sinsl */
+int extbindtodevice(struct clientparam *param, SOCKET sock){
+#if defined SO_BINDTODEVICE || defined IP_BOUND_IF
+	return bindtodevice(&param->srv->so, param->sostate, sock, param->srv->obindtodevice, *SAFAMILY(&param->sinsl));
+#else
+	return 0;
+#endif
+}
+
+/* the internal side, a socket to be bound to sincl */
+int intbindtodevice(struct clientparam *param, SOCKET sock){
+#if defined SO_BINDTODEVICE || defined IP_BOUND_IF
+	return bindtodevice(&param->srv->so, param->sostate, sock, param->srv->ibindtodevice, *SAFAMILY(&param->sincl));
+#else
+	return 0;
+#endif
+}
+
+int doconnect(struct clientparam * param){
+ SASIZETYPE size;
+
+
+ if (*SAFAMILY(&param->sincl) == *SAFAMILY(&param->req) && !memcmp(SAADDR(&param->sincl), SAADDR(&param->req), SAADDRLEN(&param->req)) &&
+	*SAPORT(&param->sincl) == *SAPORT(&param->req)) return 519;
+
+ if (param->operation == ADMIN || (( param->operation == DNSRESOLVE || param->operation == BIND || param->operation == UDPASSOC) && !param->redirected))
+	return 0;
+ if (param->operation == UDPASSOC && param->ctrlsocksrv != INVALID_SOCKET) return 0;
+ if (param->remsock != INVALID_SOCKET){
+	if(param->operation == UDPASSOC) return 0;
+	size = sizeof(param->sinsr);
+	if(param->srv->so._getpeername(param->sostate, param->remsock, (struct sockaddr *)&param->sinsr, &size)==-1) {return (14);}
+ }
+ else {
+#ifndef _WIN32
+	struct linger lg = {1,conf.timeouts[LINGER_TO]};
+#endif
+	int tries = RANGETRIES;
+
+	if(SAISNULL(&param->sinsr)){
+		if(SAISNULL(&param->req)) {
+			return 100;
+		}
+		*SAFAMILY(&param->sinsr) = *SAFAMILY(&param->req);
+		memcpy(SAADDR(&param->sinsr), SAADDR(&param->req), SAADDRLEN(&param->req)); 
+	}
+	if(!*SAPORT(&param->sinsr))*SAPORT(&param->sinsr) = *SAPORT(&param->req);
+	for(;;){
+	if ((param->remsock=param->srv->so._socket(param->sostate, SASOCK(&param->sinsr), SOCK_STREAM, 
+#ifdef WITH_UN
+	    *SAFAMILY(&param->sinsr) == AF_UNIX? 0 :
+#endif
+	    IPPROTO_TCP
+	)) == INVALID_SOCKET) {return (11);}
+	if(SAISNULL(&param->sinsl)){
+#ifdef WITH_UN
+	    if(*SAFAMILY(&param->sinsr) == AF_UNIX) param->sinsl = param->sinsr;
+	    else 
+#endif
+#ifndef NOIPV6
+		if(*SAFAMILY(&param->sinsr) == AF_INET6) param->sinsl = param->srv->extsa6;
+		else
+#endif
+			param->sinsl = param->srv->extsa;
+	}
+	*SAPORT(&param->sinsl) = 0;
+	setopts(param->remsock, &param->srv->srvsockopts);
+
+#ifndef _WIN32
+	/* not on Windows, see the accepting side in proxymain.c */
+	param->srv->so._setsockopt(param->sostate, param->remsock, SOL_SOCKET, SO_LINGER, (char *)&lg, sizeof(lg));
+#endif
+	if(extbindtodevice(param, param->remsock)) return 12;
+#ifdef IP_BIND_ADDRESS_NO_PORT
+	/* A port the kernel chooses is chosen by connect(), for the pair with
+	   the destination: one in use towards another destination, or closing
+	   from an earlier connection, does as well. bind() would take one of
+	   its own, and with many connections find none left, or search long
+	   for it. */
+	if((param->operation >= 256 || (param->operation & CONNECT) || param->redirected)
+# ifdef WITH_UN
+	    && *SAFAMILY(&param->sinsl) != AF_UNIX
+# endif
+	    ){
+		int one = 1;
+
+		param->srv->so._setsockopt(param->sostate, param->remsock, IPPROTO_IP, IP_BIND_ADDRESS_NO_PORT, (char *)&one, sizeof(one));
+	}
+#endif
+#ifdef WITH_UN
+	if(*SAFAMILY(&param->sinsl) != AF_UNIX)
+#endif
+	if(bindrange(param, param->remsock, &param->sinsl, param->extport, &tries)==-1) {
+		return 12;
+	}
+	
+	if(!(param->operation >= 256 || (param->operation & CONNECT) || param->redirected)) break;
+	if(!connectwithpoll(param, param->remsock,(struct sockaddr *)&param->sinsr,SASIZE(&param->sinsr),conf.timeouts[CONNECT_TO])) break;
+	/* The port was free to bind, but the pair it makes with the destination
+	   is still closing from an earlier connection through the same range,
+	   which Windows refuses. Another port out of the range may do. Anything
+	   else is the destination's own answer, and is not worth a second port.
+	   The ports come out of the allowance the bind is already spending, so
+	   the range is not searched any harder than one bind would search it and
+	   the attempts parentretries makes are not multiplied. Counted here as
+	   well, since the kernel option hands out a port without spending any of
+	   the allowance. */
+	if(!param->extport || errno != EADDRINUSE || --tries <= 0) return 13;
+	param->srv->so._closesocket(param->sostate, param->remsock);
+	param->remsock = INVALID_SOCKET;
+	}
+	size = sizeof(param->sinsl);
+	if(param->srv->so._getsockname(param->sostate, param->remsock, (struct sockaddr *)&param->sinsl, &size)==-1) {return (15);}
+ }
+ if (param->nconnectfilters){
+    FILTER_ACTION action;
+    
+    action = handleconnectflt(param);
+    if(action != PASS) return 19;
+ }
+ return 0;
+}
+
+/* Bind sock to sa, taking the local port from the range if one is set. The
+ * range is packed as first | last << 16.
+ *
+ * IP_LOCAL_PORT_RANGE leaves the choice to the kernel, which knows which ports
+ * are free. Where the option does not exist, or the kernel refuses it, or the
+ * address family is not one it covers, pick a port at random instead and retry
+ * on failure, since the one picked may already be taken.
+ *
+ * *tries is how many ports may still be taken out of the range. A caller which
+ * has to come back for another port, because the one it was given turned out
+ * to be unusable for the connection it wanted, carries the same count along
+ * and so cannot spend more attempts than one call would.
+ */
+static int bindrange(struct clientparam *param, SOCKET sock, PROXYSOCKADDRTYPE *sa, uint32_t range, int *tries)
+{
+	uint16_t first, last;
+
+	if(!range) return param->srv->so._bind(param->sostate, sock, (struct sockaddr *)sa, SASIZE(sa));
+
+#ifdef IP_LOCAL_PORT_RANGE
+	if(*SAFAMILY(sa) == AF_INET &&
+	   !param->srv->so._setsockopt(param->sostate, sock, IPPROTO_IP, IP_LOCAL_PORT_RANGE,
+		(char *)&range, sizeof(range))){
+		*SAPORT(sa) = 0;
+		return param->srv->so._bind(param->sostate, sock, (struct sockaddr *)sa, SASIZE(sa));
+	}
+#endif
+
+	first = (uint16_t)(range & 0xffff);
+	last = (uint16_t)(range >> 16);
+
+	while(*tries > 0){
+		(*tries)--;
+		*SAPORT(sa) = htons((uint16_t)(first + (myrand() % (unsigned)(last - first + 1))));
+		if(!param->srv->so._bind(param->sostate, sock, (struct sockaddr *)sa, SASIZE(sa))) return 0;
+	}
+
+	/* Every port tried was taken. Fall back to an ephemeral one, which is
+	   what the kernel option above does when it cannot honour the range, so
+	   an exhausted range behaves the same way on every platform. */
+	*SAPORT(sa) = 0;
+	return param->srv->so._bind(param->sostate, sock, (struct sockaddr *)sa, SASIZE(sa));
+}
+
+int bindwithrange(struct clientparam *param, SOCKET sock, PROXYSOCKADDRTYPE *sa, uint32_t range)
+{
+	int tries = RANGETRIES;
+
+	return bindrange(param, sock, sa, range, &tries);
+}
+
+int scanaddr(const unsigned char *s, uint32_t * ip, uint32_t * mask) {
+	unsigned d1, d2, d3, d4, m;
+	int res;
+	if ((res = sscanf((char *)s, "%u.%u.%u.%u/%u", &d1, &d2, &d3, &d4, &m)) < 4) return 0;
+	if(mask && res == 4) *mask = 0xFFFFFFFF;
+	else if (mask) *mask = htonl(0xFFFFFFFF << (32 - m));
+	*ip = htonl ((d1<<24) ^ (d2<<16) ^ (d3<<8) ^ d4);
+	return res;
+}
+
+RESOLVFUNC resolvfunc = NULL;
+#ifndef _WIN32
+_3proxy_mutex_t gethostbyname_mutex;
+int ghbn_init = 0;
+#endif
+
+#ifndef NOSTDRESOLVE
+#ifdef GETHOSTBYNAME_R
+struct hostent * my_gethostbyname(char *name, char *buf, struct hostent *hp){
+	struct hostent *result;
+	int gherrno;
+
+#ifdef _SOLARIS
+	return gethostbyname_r(name, hp, buf, 1024, &gherrno);
+#else
+	if(gethostbyname_r(name, hp, buf, 1024, &result, &gherrno) != 0)
+		return NULL;
+	return result;
+#endif
+}
+#endif
+#endif
+
+#ifdef NOIPV6
+uint32_t getip(unsigned char *name){
+	uint32_t retval;
+	int i;
+	int ndots = 0;
+	struct hostent *hp=NULL;
+	RESOLVFUNC tmpresolv;
+
+#ifdef GETHOSTBYNAME_R
+	struct hostent he;
+	char ghbuf[1024];
+#define gethostbyname(NAME) my_gethostbyname(NAME, ghbuf, &he)
+#endif
+
+	if(strlen((char *)name)>255)name[255] = 0;
+	for(i=0; name[i]; i++){
+		if(name[i] == '.'){
+			if(++ndots > 3) break;
+			continue;
+		}
+		if(name[i] <'0' || name[i] >'9') break;
+	}
+	if(!name[i] && ndots == 3){
+		if(scanaddr(name, &retval, NULL) == 4){
+			return retval;
+		}
+	}
+	if((tmpresolv=resolvfunc)){
+		if((*tmpresolv)(AF_INET, name, (unsigned char *)&retval)) return retval;
+		if(conf.demanddialprog) system(conf.demanddialprog);
+		return (*tmpresolv)(AF_INET, name, (unsigned char *)&retval)?retval:0;
+	}
+#ifndef NOSTDRESOLVE
+#if !defined(_WIN32) && !defined(GETHOSTBYNAME_R)
+	if(!ghbn_init){
+		_3proxy_mutex_init(&gethostbyname_mutex);
+		ghbn_init++;
+	}
+	_3proxy_mutex_lock(&gethostbyname_mutex);
+#endif
+	hp=gethostbyname((char *)name);
+	if (!hp && conf.demanddialprog) {
+		system(conf.demanddialprog);
+		hp=gethostbyname((char *)name);
+	}
+	retval = hp?*(uint32_t *)hp->h_addr:0;
+#if !defined(_WIN32) && !defined(GETHOSTBYNAME_R)
+	_3proxy_mutex_unlock(&gethostbyname_mutex);
+#endif
+#ifdef GETHOSTBYNAME_R
+#undef gethostbyname
+#endif
+#else
+	retval=0;
+#endif
+	return retval;
+}
+#endif
+
+int afdetect(unsigned char *name){
+	int ndots=0, ncols=0, nhex=0;
+	int i;
+
+	for(i=0; name[i]; i++){
+		if(name[i] == '.'){
+			if(++ndots > 3) {
+				return -1;
+			}
+		}
+		else if(name[i] == ':'){
+			if(++ncols > 7) {
+				return -1;
+			}
+		}
+		else if(name[i] == '%' || (name[i] >= 'a' && name[i] <= 'f') || (name[i] >= 'A' && name[i] <= 'F')){
+			nhex++;
+		}
+		else if(name[i] <'0' || name[i] >'9') {
+				return -1;
+		}
+	}
+	if(ndots == 3 && ncols == 0 && nhex == 0){
+		return AF_INET;
+	}
+	if(ncols >= 2) {
+		return AF_INET6;
+	}
+	return -1;
+
+}
+
+uint32_t getip46(int family, unsigned char *name,  struct sockaddr *sa){
+#ifndef NOIPV6
+	int detect;
+#ifndef NOSTDRESOLVE
+	struct addrinfo *ai, hint;
+#endif
+        RESOLVFUNC tmpresolv;
+
+	if(!sa) return 0;
+	if(!family) {
+		family = 4;
+#else
+		((struct sockaddr_in *)sa)->sin_family = AF_INET;
+		return (((struct sockaddr_in *)sa)->sin_addr.s_addr = getip(name))? AF_INET:0;
+#endif
+#ifndef NOIPV6
+	}
+
+	detect = afdetect(name);
+	if(detect != -1){
+		if(family == 4 && detect != AF_INET) return 0;
+		*SAFAMILY(sa) = (family == 6)? AF_INET6 : detect;
+		return inet_pton(*SAFAMILY(sa), (char *)name, SAADDR(sa))>0? *SAFAMILY(sa) : 0; 
+	}
+
+	if((tmpresolv = resolvfunc)){
+		int f = (family == 6 || family == 64)?AF_INET6:AF_INET;
+		*SAFAMILY(sa) = f;
+		if(tmpresolv(f, name, SAADDR(sa))) return f;
+		if(family == 4 || family == 6) return 0;
+		f = (family == 46)? AF_INET6 : AF_INET;
+		*SAFAMILY(sa) = f;
+		if(tmpresolv(f, name, SAADDR(sa))) return f;
+		return 0;
+	}
+#ifndef NOSTDRESOLVE
+	memset(&hint, 0, sizeof(hint));
+	hint.ai_family = (family == 6 || family == 64)?AF_INET6:AF_INET;
+	if (getaddrinfo((char *)name, NULL, &hint, &ai)) {
+		if(family == 64 || family == 46){
+			hint.ai_family = (family == 64)?AF_INET:AF_INET6;
+			if (getaddrinfo((char *)name, NULL, &hint, &ai)) return 0;
+		}
+		else return 0;
+	}
+	if(ai){
+		if(ai->ai_addr->sa_family == AF_INET || ai->ai_addr->sa_family == AF_INET6){
+			*SAFAMILY(sa)=ai->ai_addr->sa_family;
+			memcpy(SAADDR(sa), SAADDR(ai->ai_addr), SAADDRLEN(ai->ai_addr));
+			freeaddrinfo(ai);
+			return *SAFAMILY(sa);
+		}
+		freeaddrinfo(ai);
+	}
+#endif
+	return 0;
+#endif
+}
+
+int hascap(const unsigned char *line, const char *cap){
+ int len = (int)strlen(cap);
+ for(; *line; line++) if(!strncasecmp((char *)line, cap, len)) return 1;
+ return 0;
+}
+
+int getmultiline(struct clientparam *param, DIRECTION which, unsigned char *buf, int bufsize, const char *cap, int *found){
+ int i;
+ do {
+	i = sockgetlinebuf(param, which, buf, bufsize, '\n', conf.timeouts[STRING_L]);
+	if(i > 0 && cap && found && !*found){
+		buf[i] = 0;
+		if(hascap(buf, cap)) *found = 1;
+	}
+ } while (i > 3 && buf[3] == '-');
+ return i;
+}

@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AshProxy</title>
+  </head>
+  <body>
+    <header>
+      <div><strong>AshProxy</strong><small>1.0.0 · ядро 3proxy 1.0.4</small></div>
+      <span id="state" role="status">…</span>
+    </header>
+    <div id="error" role="alert" hidden></div>
+    <main>
+      <section id="overview">
+        <div class="toolbar">
+          <button id="start" class="primary" disabled>Запустить</button
+          ><button id="stop" disabled>Остановить</button
+          ><button id="restart" disabled>Перезапустить</button
+          ><time id="uptime">—</time>
+        </div>
+        <div id="listeners"></div>
+        <div class="metrics">
+          <div><small>Приём · RX</small><b id="rx">—</b></div>
+          <div><small>Передача · TX</small><b id="tx">—</b></div>
+          <div><small>Клиенты</small><b id="count">—</b></div>
+          <div><small>Всего за всё время</small><b id="total">—</b></div>
+        </div>
+        <div class="caption">
+          <strong>Скорость передачи</strong
+          ><select id="period" aria-label="Период графика">
+            <option value="0">60 секунд</option>
+            <option value="5">5 минут</option>
+            <option value="60">1 час</option>
+            <option value="1440">24 часа</option>
+            <option value="10080">7 дней</option>
+            <option value="43200">30 дней</option>
+          </select>
+        </div>
+        <canvas
+          id="chart"
+          role="img"
+          aria-label="График скорости RX и TX"
+        ></canvas>
+        <div class="caption">
+          <small id="rate">—</small><small id="sessions">—</small>
+        </div>
+      </section>
+      <section id="clients" hidden>
+        <h1>Активные соединения</h1>
+        <input
+          id="search"
+          type="search"
+          placeholder="Фильтр по IP или протоколу"
+        />
+        <table>
+          <thead>
+            <tr>
+              <th>IP клиента</th>
+              <th>Порт</th>
+              <th>Протокол</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <p id="empty">Активных соединений нет</p>
+      </section>
+      <section id="stats" hidden>
+        <h1>Статистика трафика</h1>
+        <div class="metrics">
+          <div><small>Всего принято · RX</small><b id="statrx">—</b></div>
+          <div><small>Всего передано · TX</small><b id="stattx">—</b></div>
+          <div><small>Итого</small><b id="statsum">—</b></div>
+        </div>
+        <div class="caption">
+          <small id="statsince">—</small
+          ><button id="resetstats" disabled>Обнулить трафик</button>
+        </div>
+        <h2>По дням</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>День</th>
+              <th>Принято</th>
+              <th>Передано</th>
+              <th>Всего</th>
+            </tr>
+          </thead>
+          <tbody id="dayrows"></tbody>
+        </table>
+        <p id="daysempty">Записей пока нет</p>
+        <h2>По месяцам</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Месяц</th>
+              <th>Принято</th>
+              <th>Передано</th>
+              <th>Всего</th>
+            </tr>
+          </thead>
+          <tbody id="monthrows"></tbody>
+        </table>
+        <p id="monthsempty">Записей пока нет</p>
+      </section>
+      <section id="config" hidden>
+        <h1>Конфигурация</h1>
+        <form id="configform">
+          <div class="grid">
+            <label>Адрес прослушивания<input name="Bind" required /></label
+            ><label
+              >Разрешённые подсети<input
+                name="Allowed"
+                placeholder="127.0.0.1/32, 192.168.90.0/23"
+                required
+            /></label>
+            <label
+              >Порт HTTP<input
+                name="HTTP"
+                type="number"
+                min="0"
+                max="65535"
+                required /></label
+            ><label
+              >Порт SOCKS5<input
+                name="SOCKS"
+                type="number"
+                min="0"
+                max="65535"
+                required
+            /></label>
+            <label
+              >Приём, кбит/с<input
+                name="DownloadKbps"
+                type="number"
+                min="0"
+                max="2000000"
+                required /></label
+            ><label
+              >Передача, кбит/с<input
+                name="UploadKbps"
+                type="number"
+                min="0"
+                max="2000000"
+                required
+            /></label>
+          </div>
+          <details>
+            <summary>Родительский прокси</summary>
+            <div class="grid">
+              <label
+                >Протокол<select id="parenttype">
+                  <option value="">Напрямую</option>
+                  <option value="connect">HTTP CONNECT</option>
+                  <option value="socks5">SOCKS5</option>
+                </select></label
+              ><label
+                >Адрес и порт<input
+                  name="ParentAddr"
+                  placeholder="192.168.1.10:1080"
+              /></label>
+            </div>
+          </details>
+          <p>
+            Подсети клиентов перечисляются через запятую: маска от /0 до /32,
+            адрес без маски считается одним узлом (/32). 0.0.0.0/0 разрешает
+            любые адреса. Порт 0 отключает протокол. Скорость 0 снимает
+            ограничение.
+          </p>
+          <p id="aclwarn" class="warn" role="status" hidden></p>
+          <button class="primary">Применить</button><output id="saved"></output>
+        </form>
+        <details>
+          <summary>Аутентификация</summary>
+          <p id="account"></p>
+          <form id="credentials">
+            <div class="grid">
+              <label
+                >Логин<input
+                  id="username"
+                  autocomplete="off"
+                  pattern="[A-Za-z0-9._\-]{1,32}"
+                  maxlength="32"
+                  required /></label
+              ><label
+                >Новый пароль<input
+                  id="password"
+                  type="password"
+                  autocomplete="new-password"
+                  required
+              /></label>
+            </div>
+            <button>Сохранить учётную запись</button
+            ><button type="button" id="removeuser">Отключить пароль</button>
+          </form>
+        </details>
+        <details id="backups">
+          <summary>Резервные копии</summary>
+          <select id="versions" aria-label="Дата копии"></select>
+          <button id="restore" disabled>Восстановить</button>
+        </details>
+      </section>
+      <section id="journal" hidden>
+        <h1>Журнал сеанса</h1>
+        <small>Время · сервис · код · клиент · назначение · RX · TX</small>
+        <pre id="logs"></pre>
+      </section>
+      <section id="settings" hidden>
+        <h1>Настройки</h1>
+        <fieldset>
+          <legend>Запуск</legend>
+          <label
+            ><input id="startup" type="checkbox" disabled /> Запускать AshProxy
+            вместе с Windows</label
+          >
+          <label
+            ><input id="auto" type="checkbox" disabled /> Запускать прокси при
+            открытии AshProxy</label
+          >
+          <label
+            ><input id="hidden" type="checkbox" disabled /> Запускать окно
+            свёрнутым в трей</label
+          >
+        </fieldset>
+        <label class="select"
+          >Тема
+          <select id="theme">
+            <option value="system">Системная</option>
+            <option value="light">Светлая</option>
+            <option value="dark">Тёмная</option>
+          </select></label
+        >
+        <p id="status" role="status"></p>
+      </section>
+    </main>
+    <nav aria-label="Разделы">
+      <button data-tab="overview" aria-current="page">Обзор</button
+      ><button data-tab="stats">Статистика</button
+      ><button data-tab="clients">Клиенты</button
+      ><button data-tab="config">Конфиг</button
+      ><button data-tab="journal">Журнал</button
+      ><button data-tab="settings">Настройки</button>
+    </nav>
+    <script type="module" src="/src/app.ts"></script>
+  </body>
+</html>
