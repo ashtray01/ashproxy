@@ -17,3 +17,15 @@ Build from the repository root with a MinGW-w64 toolchain and GNU make.
 For w64devkit without LTO, set the environment variables CFLAGS and LDFLAGS
 to -O2 before running `make -f Makefile.win`. The resulting engine is
 `bin/3proxy.exe`.
+
+## What the tree keeps
+
+Only what the Windows engine needs is vendored: `src/` with the C sources,
+headers, the resource script and the plugins and libs directories, the Windows
+makefiles (`Makefile.win`, `Makefile.inc`, `src/Makefile`, `src/Makefile.inc`),
+`bin/` for the output, `copying`, `authors`, `RELEASE` and the changelogs.
+Upstream documentation (doc/, man/, rus.3ps), sample configurations (cfg/),
+packaging (debian/, scripts/, Dockerfiles, CMake and the non-Windows
+makefiles), the package signing key, the security policy and the Python test
+harness live in https://github.com/3proxy/3proxy and are not copied here, so
+core updates touch only the sources we actually compile.
