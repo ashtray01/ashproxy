@@ -26,7 +26,7 @@ jobs:
           make -C src -j4 OPENSSL_CHECK=false PCRE_CHECK=false EXTRA_CFLAGS=-DASHPROXY_DESKTOP ../bin/3proxy.exe
           mkdir -p desktop/core
           cp bin/3proxy.exe desktop/core/
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: desktop/go.mod
           cache-dependency-path: desktop/go.sum
