@@ -37,6 +37,7 @@ res
 version.c
 version
 version.sh
+!desktop/VERSION
 buildlinux.sh
 3proxy.res
 
