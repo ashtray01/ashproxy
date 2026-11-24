@@ -124,7 +124,7 @@ func (w *output) line(line string) {
 		}
 		if elapsed > 0 && elapsed < 5 && rx >= s.rx && tx >= s.tx {
 			s.history = append(s.history, Sample{float64(rx-s.rx) / elapsed, float64(tx-s.tx) / elapsed})
-			if len(s.history) > 60 {
+			if len(s.history) > 3600 {
 				s.history = s.history[1:]
 			}
 		} else {

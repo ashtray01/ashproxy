@@ -78,7 +78,7 @@ func joinAllowed(list []netip.Prefix) string {
 	return strings.Join(parts, ", ")
 }
 
-// allowedRule renders the subnets in the comma separated form 3proxy reads.
+// allowedRule returns the normalized networks for individual ACL entries.
 func allowedRule(value string) []string {
 	list, err := parseAllowed(value)
 	if err != nil {
@@ -146,10 +146,12 @@ func (c Config) render() string {
 	if c.UploadKbps > 0 {
 		fmt.Fprintf(&b, "bandlimout %d\n", c.UploadKbps*1000)
 	}
-	fmt.Fprintf(&b, "allow * %s\n", strings.Join(allowedRule(c.Allowed), ","))
-	if c.ParentType != "" {
-		addr := netip.MustParseAddrPort(c.ParentAddr)
-		fmt.Fprintf(&b, "parent 1000 %s %s %d\n", c.ParentType, addr.Addr(), addr.Port())
+	for _, network := range allowedRule(c.Allowed) {
+		fmt.Fprintf(&b, "allow * %s\n", network)
+		if c.ParentType != "" {
+			addr := netip.MustParseAddrPort(c.ParentAddr)
+			fmt.Fprintf(&b, "parent 1000 %s %s %d\n", c.ParentType, addr.Addr(), addr.Port())
+		}
 	}
 	b.WriteString("deny *\n")
 	if c.HTTP != 0 {

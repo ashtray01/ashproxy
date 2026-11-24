@@ -184,7 +184,7 @@ func (m *Manager) Traffic(minutes int) ([]Sample, error) {
 	}
 	now := time.Now().Unix() / 60
 	first := now - int64(minutes) + 1
-	width := (minutes + 59) / 60
+	width := (minutes + 719) / 720
 	rows, err := m.ledger.db.Query("SELECT (minute-?)/?, SUM(rx), SUM(tx) FROM traffic WHERE minute BETWEEN ? AND ? GROUP BY 1", first, width, first, now)
 	if err != nil {
 		return nil, err

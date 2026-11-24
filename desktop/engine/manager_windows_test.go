@@ -31,7 +31,7 @@ func TestProtocolsAndLifecycle(t *testing.T) {
 	}
 	m := New(exe, filepath.Join(t.TempDir(), "данные с пробелами"))
 	c := defaults()
-	c.Allowed = "127.0.0.1/32, 192.168.90.0/23"
+	c.Allowed = "192.168.90.0/23, 127.0.0.1/32"
 	c.HTTP = freePort(t)
 	c.SOCKS = freePort(t)
 	if err := m.Save(c); err != nil {
@@ -219,7 +219,7 @@ func TestInvalidSettings(t *testing.T) {
 	if got := c.normalize().Allowed; got != "192.168.90.0/23, 127.0.0.1/32" {
 		t.Fatal(got)
 	}
-	if got := c.normalize().render(); !strings.Contains(got, "allow * 192.168.90.0/23,127.0.0.1/32\n") {
+	if got := c.normalize().render(); !strings.Contains(got, "allow * 192.168.90.0/23\nallow * 127.0.0.1/32\n") {
 		t.Fatal(got)
 	}
 	c = defaults()

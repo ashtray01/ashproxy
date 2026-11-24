@@ -91,6 +91,30 @@ period.onchange = () => {
   else chart(view?.History || [])
 }
 function chart(points: Sample[]) {
+  const minutes = Number(period.value)
+  if (!minutes) points = points.slice(-60)
+  if (minutes === 5 || minutes === 60) {
+    const recent = view?.History || []
+    const end = Math.floor(Date.now() / 1000)
+    const seconds = minutes * 60
+    const step = minutes === 5 ? 1 : 10
+    const firstMinute = Math.floor(end / 60) - minutes + 1
+    const averages = points
+    points = Array.from({ length: seconds / step }, (_, i) => {
+      let RX = 0, TX = 0, count = 0
+      for (let j = 0; j < step; j++) {
+        const offset = 1 - seconds + i * step + j
+        const sample = recent[recent.length - 1 + offset] ??
+          averages[Math.floor((end + offset) / 60) - firstMinute]
+        if (sample) {
+          RX += sample.RX
+          TX += sample.TX
+          count++
+        }
+      }
+      return count ? { RX: RX / count, TX: TX / count } : { RX: 0, TX: 0 }
+    })
+  }
   const seriesSize = Number(period.value) ? Math.max(2, points.length) : 60
   const canvas = el<HTMLCanvasElement>('chart'),
     dpr = devicePixelRatio || 1
@@ -105,10 +129,16 @@ function chart(points: Sample[]) {
   g.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue(
     'color',
   )
+  g.font = '10px system-ui'
+  g.fillStyle = g.strokeStyle
+  const left = Math.ceil(g.measureText(size(peak) + '/с').width) + 8
+  for (let i = 0; i <= 4; i++) {
+    g.fillText(size(peak * (4 - i) / 4) + '/с', 2, 10 + (h - 13) * i / 4)
+  }
   g.globalAlpha = 0.14
   for (let i = 1; i <= 3; i++) {
     g.beginPath()
-    g.moveTo(0, (h * i) / 4)
+    g.moveTo(left, (h * i) / 4)
     g.lineTo(w, (h * i) / 4)
     g.stroke()
   }
@@ -121,7 +151,7 @@ function chart(points: Sample[]) {
     g.lineWidth = 1.8
     g.beginPath()
     points.forEach((p, i) => {
-      const x = (w * (seriesSize - points.length + i)) / (seriesSize - 1),
+      const x = left + ((w - left) * (seriesSize - points.length + i)) / (seriesSize - 1),
         y = h - 2 - ((h - 5) * p[key]) / peak
       if (i) g.lineTo(x, y)
       else g.moveTo(x, y)
@@ -130,7 +160,7 @@ function chart(points: Sample[]) {
   }
   canvas.onmousemove = (e) => {
     const i =
-      Math.round((e.offsetX / w) * (seriesSize - 1)) -
+      Math.round(((e.offsetX - left) / (w - left)) * (seriesSize - 1)) -
       (seriesSize - points.length)
     if (points[i])
       canvas.title =
@@ -246,7 +276,7 @@ function draw(v: View) {
     '↓ ' + size(p?.RX || 0) + '/с   ↑ ' + size(p?.TX || 0) + '/с'
   chart(Number(period.value) ? historic : points)
   rows()
-  if (Number(period.value) && Date.now() - fetched > 30000) {
+  if (Number(period.value) && Date.now() - fetched > 5000) {
     fetched = Date.now()
     void refreshHistory()
   }

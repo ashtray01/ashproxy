@@ -49,7 +49,7 @@ func main() {
 	service.Manager = app.Autostart
 	config := manager.Configuration()
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Name: "main", Title: "AshProxy", URL: "/", Width: 500, Height: 400,
+		Name: "main", Title: "AshProxy", URL: "/", Width: 500, Height: 480,
 		MinWidth: 400, MinHeight: 300,
 		Hidden: config.StartHidden,
 	})

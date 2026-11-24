@@ -159,7 +159,7 @@ button:hover:enabled {
 canvas {
   display: block;
   width: 100%;
-  height: clamp(60px, 19vh, 155px);
+  height: clamp(78px, 23vh, 190px);
   background: var(--surface);
   border: 1px solid var(--line);
 }
